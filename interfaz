@@ -1,0 +1,145 @@
+import sys
+import io
+import requests
+import cv2
+from pyzbar.pyzbar import decode
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QFileDialog,
+    QFormLayout, QLineEdit, QPushButton, QVBoxLayout, QMessageBox
+)
+from PyQt5.QtCore import QThread, pyqtSignal
+from users import registerUser, getQR  # 
+
+
+class QRScannerThread(QThread):
+    qr_scanned = pyqtSignal(str)
+
+    def run(self):
+        cap = cv2.VideoCapture(0)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            decoded_objs = decode(frame)
+            for obj in decoded_objs:
+                data = obj.data.decode('utf-8')
+                self.qr_scanned.emit(data)
+                cap.release()
+                cv2.destroyAllWindows()
+                return
+            cv2.imshow("Escaneando QR - presiona Q para salir", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        cap.release()
+        cv2.destroyAllWindows()
+
+
+class QRApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Registro de Usuario y Generador de QR")
+        self.qr_buffer = None
+        self._build_ui()
+
+    def _build_ui(self):
+        form_layout = QFormLayout()
+        main_layout = QVBoxLayout()
+
+        self.id_input = QLineEdit()
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.role_input = QLineEdit()
+        self.program_input = QLineEdit()
+
+        form_layout.addRow("ID:", self.id_input)
+        form_layout.addRow("Contraseña:", self.password_input)
+        form_layout.addRow("Cargo:", self.role_input)
+        form_layout.addRow("Programa:", self.program_input)
+
+        self.register_btn = QPushButton("Registrar y Generar QR")
+        self.register_btn.clicked.connect(self.on_register)
+
+        self.download_btn = QPushButton("Descargar QR")
+        self.download_btn.setEnabled(False)
+        self.download_btn.clicked.connect(self.on_download)
+
+        self.send_btn = QPushButton("Enviar QR al Servidor")
+        self.send_btn.setEnabled(False)
+        self.send_btn.clicked.connect(self.on_send)
+
+        self.scan_qr_btn = QPushButton("Escanear QR")
+        self.scan_qr_btn.clicked.connect(self.on_scan_qr)
+
+        main_layout.addLayout(form_layout)
+        main_layout.addWidget(self.register_btn)
+        main_layout.addWidget(self.download_btn)
+        main_layout.addWidget(self.send_btn)
+        main_layout.addWidget(self.scan_qr_btn)
+
+        self.setLayout(main_layout)
+
+    def on_register(self):
+        user_id = self.id_input.text().strip()
+        password = self.password_input.text().strip()
+        program = self.program_input.text().strip()
+        role = self.role_input.text().strip().lower()
+
+        if not user_id or not program or not role:
+            QMessageBox.warning(self, "Error", "Por favor completa todos los campos.")
+            return
+
+        result = registerUser(user_id, password, program, role)
+        QMessageBox.information(self, "Registro", result)
+        if "registered" in result.lower():
+            buffer = getQR(user_id, password)
+            if buffer:
+                self.qr_buffer = buffer.getvalue()
+                QMessageBox.information(self, "QR", "Código QR generado con éxito.")
+                self.download_btn.setEnabled(True)
+                self.send_btn.setEnabled(True)
+            else:
+                QMessageBox.critical(self, "Error", "No se pudo generar el código QR.")
+
+    def on_download(self):
+        if self.qr_buffer:
+            path, _ = QFileDialog.getSaveFileName(self, "Guardar QR", "qr.png", "PNG Files (*.png)")
+            if path:
+                try:
+                    with open(path, 'wb') as f:
+                        f.write(self.qr_buffer)
+                    QMessageBox.information(self, "Guardado", f"QR guardado en: {path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Error al guardar el archivo: {e}")
+
+    def on_send(self):
+        if self.qr_buffer:
+            try:
+                server_url = "http://192.168.1.68:5000/sendqr"  
+                headers = {"Content-Type": "application/octet-stream"}
+                response = requests.post(server_url, data=self.qr_buffer, headers=headers)
+                if response.status_code == 200:
+                    QMessageBox.information(self, "Asignación de Puesto", response.text)
+                else:
+                    QMessageBox.warning(self, "Fallo", f"Error del servidor: {response.status_code}\n{response.text}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"No se pudo enviar al servidor: {e}")
+
+    def on_scan_qr(self):
+        self.scanner_thread = QRScannerThread()
+        self.scanner_thread.qr_scanned.connect(self.on_qr_detected)
+        self.scanner_thread.start()
+
+    def on_qr_detected(self, data):
+        QMessageBox.information(self, "QR Detectado", f"Datos: {data}")
+        self.id_input.setText(data)
+
+
+def launch_interface():
+    app = QApplication(sys.argv)
+    window = QRApp()
+    window.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    launch_interface()
